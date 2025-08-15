@@ -217,7 +217,7 @@ create_profile() {
     generate_dante_config
     
     print_status "Настройка брандмауэра..."
-    ufw allow "$port/tcp" > /dev/null 2>&1
+    ufw allow proto tcp from 0.0.0.0/0 to any port "$port" > /dev/null 2>&1
     
     print_status "Перезапуск службы..."
     systemctl restart danted
