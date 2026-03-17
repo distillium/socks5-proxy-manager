@@ -23,7 +23,7 @@
 
 ## Установка:
 ```bash
-wget -q -O install.sh https://raw.githubusercontent.com/distillium/socks5-proxy-manager/main/install.sh && chmod +x install.sh && sudo ./install.sh
+wget -q -O install.sh https://raw.githubusercontent.com/distillium/socks5-proxy-manager/main/install.sh && chmod +x install.sh && ./install.sh
 ```
 
 ## Шаблоны профилей:
