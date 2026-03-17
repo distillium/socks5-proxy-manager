@@ -7,10 +7,18 @@ CYAN='\033[0;36m'
 BLUE="$CYAN"
 NC='\033[0m'
 
+VERSION="1.0.0"
+
 MANAGER_DIR="/etc/socks5-manager"
 PROFILES_FILE="$MANAGER_DIR/profiles.json"
 SCRIPT_PATH="/usr/local/bin/socks"
 DANTE_CONFIG="/etc/danted.conf"
+
+MONITOR_DIR="/opt/socks5-monitor"
+MONITOR_WEB="$MONITOR_DIR/web"
+MONITOR_PORT=9090
+MONITOR_SERVICE="socks5-monitor"
+MONITOR_REPO="https://raw.githubusercontent.com/distillium/socks5-proxy-manager/main/monitor"
 
 print_status() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -414,6 +422,196 @@ delete_profile() {
     print_success "Профиль '$profile_name' успешно удален"
 }
 
+# Мониторинг
+install_monitor() {
+    print_status "Установка веб-дашборда мониторинга..."
+
+    if ! command -v python3 &>/dev/null; then
+        print_error "Python3 не найден. Установите: apt install python3"
+        return 1
+    fi
+
+    if ! command -v conntrack &>/dev/null; then
+        print_status "Установка conntrack-tools..."
+        apt install -y conntrack > /dev/null 2>&1
+    fi
+
+    mkdir -p "$MONITOR_WEB"
+
+    print_status "Скачивание файлов мониторинга..."
+    wget -q -O "$MONITOR_DIR/socks5-monitor.py" "$MONITOR_REPO/socks5-monitor.py"
+    wget -q -O "$MONITOR_WEB/index.html" "$MONITOR_REPO/index.html"
+    wget -q -O "$MONITOR_WEB/favicon.svg" "$MONITOR_REPO/favicon.svg"
+    chmod +x "$MONITOR_DIR/socks5-monitor.py"
+
+    if [ ! -f "$MONITOR_DIR/socks5-monitor.py" ] || [ ! -f "$MONITOR_WEB/index.html" ]; then
+        print_error "Не удалось скачать файлы мониторинга"
+        return 1
+    fi
+
+    if ! command -v rsvg-convert &>/dev/null; then
+        apt install -y librsvg2-bin > /dev/null 2>&1
+    fi
+    if command -v rsvg-convert &>/dev/null; then
+        rsvg-convert "$MONITOR_WEB/favicon.svg" -w 180 -h 180 -o "$MONITOR_WEB/apple-touch-icon.png" 2>/dev/null
+        rsvg-convert "$MONITOR_WEB/favicon.svg" -w 192 -h 192 -o "$MONITOR_WEB/icon-192.png" 2>/dev/null
+        rsvg-convert "$MONITOR_WEB/favicon.svg" -w 32 -h 32 -o "$MONITOR_WEB/favicon.png" 2>/dev/null
+        print_status "Иконки сгенерированы"
+    fi
+
+    # Настройка авторизации
+    echo ""
+    print_header "НАСТРОЙКА ДОСТУПА К ДАШБОРДУ"
+    read -p "Установить пароль для доступа? [Y/n]: " auth_choice
+
+    local auth_args=""
+    local mon_user=""
+    local mon_pass=""
+
+    if [[ ! "$auth_choice" =~ ^[Nn]$ ]]; then
+        read -p "Логин: " mon_user
+        read -s -p "Пароль: " mon_pass
+        echo ""
+
+        if [ -n "$mon_user" ] && [ -n "$mon_pass" ]; then
+            auth_args="--user $mon_user --password $mon_pass"
+            echo "$mon_user:$mon_pass" > "$MONITOR_DIR/.auth"
+            chmod 600 "$MONITOR_DIR/.auth"
+            print_status "Авторизация настроена"
+        else
+            print_warning "Логин или пароль пустые, дашборд будет без авторизации"
+        fi
+    fi
+
+    cat > "/etc/systemd/system/${MONITOR_SERVICE}.service" <<EOF
+[Unit]
+Description=SOCKS5 Proxy Monitor Dashboard
+After=network.target danted.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 $MONITOR_DIR/socks5-monitor.py --port $MONITOR_PORT --dir $MONITOR_WEB $auth_args
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "$MONITOR_SERVICE" > /dev/null 2>&1
+    systemctl restart "$MONITOR_SERVICE"
+
+    ufw allow "$MONITOR_PORT/tcp" > /dev/null 2>&1 || true
+
+    sleep 1
+    if systemctl is-active --quiet "$MONITOR_SERVICE"; then
+        local external_ip=$(curl -4 -s ifconfig.me 2>/dev/null || echo "YOUR_IP")
+        echo ""
+        print_success "Дашборд мониторинга установлен!"
+        echo ""
+        echo -e "  Дашборд: ${CYAN}http://$external_ip:$MONITOR_PORT${NC}"
+        if [ -n "$mon_user" ]; then
+            echo -e "  Логин:   ${CYAN}$mon_user${NC}"
+            echo -e "  Пароль:  ${CYAN}$mon_pass${NC}"
+        fi
+    else
+        print_error "Сервис не запустился. Проверьте: journalctl -u $MONITOR_SERVICE -n 20"
+    fi
+}
+
+uninstall_monitor() {
+    print_status "Удаление мониторинга..."
+    systemctl stop "$MONITOR_SERVICE" 2>/dev/null
+    systemctl disable "$MONITOR_SERVICE" 2>/dev/null
+    rm -f "/etc/systemd/system/${MONITOR_SERVICE}.service"
+    systemctl daemon-reload
+    rm -rf "$MONITOR_DIR"
+    ufw delete allow "$MONITOR_PORT/tcp" > /dev/null 2>&1 || true
+    print_success "Мониторинг удален"
+}
+
+show_monitor_menu() {
+    clear
+    print_header "МОНИТОРИНГ SOCKS5"
+    echo ""
+
+    local is_installed=false
+    local is_running=false
+
+    if [ -f "$MONITOR_DIR/socks5-monitor.py" ]; then
+        is_installed=true
+        if systemctl is-active --quiet "$MONITOR_SERVICE" 2>/dev/null; then
+            is_running=true
+        fi
+    fi
+
+    if $is_installed; then
+        local external_ip=$(curl -4 -s ifconfig.me 2>/dev/null || echo "YOUR_IP")
+
+        if $is_running; then
+            echo -e "  Статус: ${GREEN}АКТИВЕН${NC}"
+            echo -e "  URL:    ${CYAN}http://$external_ip:$MONITOR_PORT${NC}"
+        else
+            echo -e "  Статус: ${RED}ОСТАНОВЛЕН${NC}"
+        fi
+
+        if [ -f "$MONITOR_DIR/.auth" ]; then
+            local saved_user=$(cut -d: -f1 "$MONITOR_DIR/.auth")
+            echo -e "  Логин:  ${CYAN}$saved_user${NC}"
+            echo -e "  Пароль: (сохранён)"
+        else
+            echo -e "  Защита: ${YELLOW}нет${NC}"
+        fi
+
+        echo ""
+        echo -e "${CYAN}1.${NC} Открыть/обновить дашборд (переустановка)"
+        if $is_running; then
+            echo -e "${CYAN}2.${NC} Остановить мониторинг"
+        else
+            echo -e "${CYAN}2.${NC} Запустить мониторинг"
+        fi
+        echo -e "${CYAN}3.${NC} Удалить мониторинг"
+        echo -e "${CYAN}0.${NC} Назад"
+        echo ""
+        read -p "Выберите действие (0-3): " mchoice
+
+        case $mchoice in
+            1) install_monitor ;;
+            2)
+                if $is_running; then
+                    systemctl stop "$MONITOR_SERVICE"
+                    print_success "Мониторинг остановлен"
+                else
+                    systemctl start "$MONITOR_SERVICE"
+                    sleep 1
+                    if systemctl is-active --quiet "$MONITOR_SERVICE"; then
+                        print_success "Мониторинг запущен: http://$external_ip:$MONITOR_PORT"
+                    else
+                        print_error "Не удалось запустить. Проверьте: journalctl -u $MONITOR_SERVICE -n 20"
+                    fi
+                fi
+                ;;
+            3) uninstall_monitor ;;
+            0) return ;;
+            *) print_error "Неверный выбор"; sleep 1 ;;
+        esac
+    else
+        echo -e "  Статус: ${YELLOW}НЕ УСТАНОВЛЕН${NC}"
+        echo ""
+        echo -e "${CYAN}1.${NC} Установить веб-дашборд мониторинга"
+        echo -e "${CYAN}0.${NC} Назад"
+        echo ""
+        read -p "Выберите действие (0-1): " mchoice
+
+        case $mchoice in
+            1) install_monitor ;;
+            0) return ;;
+            *) print_error "Неверный выбор"; sleep 1 ;;
+        esac
+    fi
+}
+
 uninstall_manager() {
     print_header "ПОЛНОЕ УДАЛЕНИЕ SOCKS5 МЕНЕДЖЕРА"
     
@@ -446,6 +644,16 @@ uninstall_manager() {
     rm -f "$SCRIPT_PATH"
     rm -f /usr/local/bin/socks5-manager.sh
     DEBIAN_FRONTEND=noninteractive apt --purge remove -y dante-server > /dev/null 2>&1
+
+    # Удаляем мониторинг если установлен
+    if [ -d "$MONITOR_DIR" ]; then
+        systemctl stop "$MONITOR_SERVICE" 2>/dev/null
+        systemctl disable "$MONITOR_SERVICE" 2>/dev/null
+        rm -f "/etc/systemd/system/${MONITOR_SERVICE}.service"
+        systemctl daemon-reload
+        rm -rf "$MONITOR_DIR"
+        ufw delete allow "$MONITOR_PORT/tcp" > /dev/null 2>&1 || true
+    fi
     
     print_success "SOCKS5 менеджер полностью удален"
 }
@@ -454,16 +662,19 @@ show_main_menu() {
     while true; do
         clear
         print_header "SOCKS5 PROXY MANAGER by distillium"
+        echo -e "${CYAN}Версия:${NC} ${VERSION}"
         echo ""
         echo -e "${CYAN}1.${NC} Показать все подключения"
         echo -e "${CYAN}2.${NC} Создать новое подключение"
         echo ""
-        echo -e "${CYAN}3.${NC} Удалить подключение"
-        echo -e "${CYAN}4.${NC} Удалить менеджер и все конфигурации"
+        echo -e "${CYAN}3.${NC} Мониторинг (веб-дашборд)"
+        echo ""
+        echo -e "${CYAN}4.${NC} Удалить подключение"
+        echo -e "${CYAN}5.${NC} Удалить менеджер и все конфигурации"
         echo ""
         echo -e "${CYAN}0.${NC} Выход"
         echo ""
-        read -p "Выберите пункт меню (0-4): " choice
+        read -p "Выберите пункт меню (0-5): " choice
         echo -e "–  Быстрый запуск: ${CYAN}socks${NC} доступен из любой точки системы"
         case $choice in
             1)
@@ -479,12 +690,17 @@ show_main_menu() {
                 read -p "Нажмите Enter для продолжения..."
                 ;;
             3)
+                show_monitor_menu
+                echo ""
+                read -p "Нажмите Enter для продолжения..."
+                ;;
+            4)
                 clear
                 delete_profile
                 echo ""
                 read -p "Нажмите Enter для продолжения..."
                 ;;
-            4)
+            5)
                 clear
                 uninstall_manager
                 exit 0
