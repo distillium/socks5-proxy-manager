@@ -7,7 +7,7 @@ CYAN='\033[0;36m'
 BLUE="$CYAN"
 NC='\033[0m'
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 MANAGER_DIR="/etc/socks5-manager"
 PROFILES_FILE="$MANAGER_DIR/profiles.json"
@@ -79,11 +79,32 @@ setup_socks_command() {
 
 install_dependencies() {
     print_status "Обновление пакетов и установка зависимостей..."
-    apt update > /dev/null 2>&1 && apt install -y dante-server jq > /dev/null 2>&1
-    
-    if [ $? -ne 0 ]; then
-        print_error "Ошибка при установке пакетов"
-        exit 1
+    apt update > /dev/null 2>&1
+
+    apt install -y jq > /dev/null 2>&1
+
+    if ! apt install -y dante-server > /dev/null 2>&1; then
+        print_warning "dante-server не найден в репозитории, устанавливаю из Debian Bookworm..."
+
+        local arch=$(dpkg --print-architecture)
+        local deb_url="http://ftp.us.debian.org/debian/pool/main/d/dante/dante-server_1.4.2+dfsg-7+b8_${arch}.deb"
+        local deb_file="/tmp/dante-server.deb"
+
+        wget -q -O "$deb_file" "$deb_url"
+        if [ ! -f "$deb_file" ] || [ ! -s "$deb_file" ]; then
+            print_error "Не удалось скачать dante-server для архитектуры $arch"
+            exit 1
+        fi
+
+        dpkg -i "$deb_file" > /dev/null 2>&1
+        apt install -f -y > /dev/null 2>&1
+        rm -f "$deb_file"
+
+        if ! command -v danted &>/dev/null; then
+            print_error "Не удалось установить dante-server"
+            exit 1
+        fi
+        print_status "dante-server установлен из пакета Bookworm"
     fi
 }
 
